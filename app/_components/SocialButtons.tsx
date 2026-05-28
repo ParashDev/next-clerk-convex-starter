@@ -1,10 +1,8 @@
 "use client";
 
 import { useState, ReactNode } from "react";
-import { useSignIn, useSignUp } from "@clerk/nextjs/legacy";
-import { useClerk } from "@clerk/nextjs";
+import { useSignIn, useSignUp, useClerk } from "@clerk/nextjs";
 import { Loader2 } from "lucide-react";
-import { extractClerkError } from "./clerkErrors";
 
 // Strategy strings come from Clerk. Add the matching entry to PROVIDERS below
 // when you enable a new provider in Clerk dashboard → Social Connections,
@@ -38,8 +36,8 @@ export function SocialButtons({
   onError: (msg: string) => void;
 }) {
   const clerk = useClerk();
-  const { signIn, isLoaded: signInLoaded } = useSignIn();
-  const { signUp, isLoaded: signUpLoaded } = useSignUp();
+  const { signIn } = useSignIn();
+  const { signUp } = useSignUp();
   const [loading, setLoading] = useState<OAuthStrategy | null>(null);
 
   // Filter PROVIDERS to only those actually enabled in this Clerk app.
@@ -61,26 +59,28 @@ export function SocialButtons({
   if (!clerk.loaded) return null;
   const enabled = env?.userSettings?.authenticatableSocialStrategies ?? [];
 
-const visible = PROVIDERS.filter((p) => enabled.includes(p.strategy));
+  const visible = PROVIDERS.filter((p) => enabled.includes(p.strategy));
   if (visible.length === 0) return null;
 
-  const isLoaded = mode === "sign-in" ? signInLoaded : signUpLoaded;
+  // Both hooks are loaded here (we returned early on !clerk.loaded).
   const auth = mode === "sign-in" ? signIn : signUp;
 
   const handleClick = async (strategy: OAuthStrategy) => {
-    if (!isLoaded || !auth || loading) return;
+    if (!auth || loading) return;
     setLoading(strategy);
-    try {
-      await auth.authenticateWithRedirect({
-        strategy,
-        redirectUrl: "/sso-callback",
-        redirectUrlComplete: "/dashboard",
-      });
-    } catch (err: unknown) {
-      onError(extractClerkError(err));
+    // redirectUrl:         where to land after a clean OAuth sign-in
+    // redirectCallbackUrl: the page that completes the handshake and handles
+    //                      account-transfer / new-user signup edge cases
+    const { error } = await auth.sso({
+      strategy,
+      redirectUrl: "/dashboard",
+      redirectCallbackUrl: "/sso-callback",
+    });
+    if (error) {
+      onError(error.message ?? "Could not start the sign-in flow.");
       setLoading(null);
     }
-    // No `finally` reset — the success path navigates away.
+    // On success the browser navigates to the provider — no reset needed.
   };
 
   return (
@@ -90,7 +90,7 @@ const visible = PROVIDERS.filter((p) => enabled.includes(p.strategy));
           <button
             key={p.strategy}
             type="button"
-            disabled={!isLoaded || loading !== null}
+            disabled={loading !== null}
             onClick={() => handleClick(p.strategy)}
             className="w-full inline-flex items-center justify-center gap-2 rounded-md border border-neutral-200 bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 hover:bg-neutral-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >

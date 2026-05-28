@@ -1,76 +1,158 @@
 "use client";
 
 import { useState, FormEvent } from "react";
-import { useSignIn } from "@clerk/nextjs/legacy";
+import { useSignIn } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Layers, Eye, EyeOff, Loader2, ArrowRight, Shield } from "lucide-react";
+import { Layers, Eye, EyeOff, Loader2, ArrowRight, Mail, Shield } from "lucide-react";
 import { SocialButtons } from "../_components/SocialButtons";
-import { extractClerkError } from "../_components/clerkErrors";
 
-type Phase = "credentials" | "second_factor";
-type SecondFactor = "totp" | "backup_code";
+// The strategy we're currently asking the user to verify with.
+//  - email_code / phone_code: a code was SENT (resend available)
+//  - totp:        read from the user's authenticator app
+//  - backup_code: one of the user's saved one-time codes
+type VerifyStrategy = "email_code" | "phone_code" | "totp" | "backup_code";
 
 export default function SignInPage() {
-  const { signIn, isLoaded, setActive } = useSignIn();
+  const { signIn, errors, fetchStatus } = useSignIn();
   const router = useRouter();
 
-  const [phase, setPhase] = useState<Phase>("credentials");
+  const [phase, setPhase] = useState<"credentials" | "verify">("credentials");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [code, setCode] = useState("");
-  const [factor, setFactor] = useState<SecondFactor>("totp");
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [strategy, setStrategy] = useState<VerifyStrategy>("email_code");
+  // For enrolled MFA we may offer a fallback toggle (authenticator <-> backup code).
+  const [canUseBackupCode, setCanUseBackupCode] = useState(false);
+  const [bannerError, setBannerError] = useState<string | null>(null);
+
+  const submitting = fetchStatus === "fetching";
+
+  const finishAndRedirect = async () => {
+    await signIn.finalize({
+      navigate: ({ session, decorateUrl }) => {
+        // If Clerk has follow-up session tasks (org selection, forced MFA
+        // enrollment, etc.) it drives them itself when we return early.
+        if (session?.currentTask) return;
+        const url = decorateUrl("/dashboard");
+        if (url.startsWith("http")) {
+          window.location.href = url;
+        } else {
+          router.push(url);
+        }
+      },
+    });
+  };
 
   const handleCredentials = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isLoaded || submitting) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      const result = await signIn.create({ identifier: email, password });
-      if (result.status === "complete") {
-        await setActive({ session: result.createdSessionId });
-        router.push("/dashboard");
+    if (submitting) return;
+    setBannerError(null);
+
+    const { error } = await signIn.password({ emailAddress: email, password });
+    if (error) {
+      setBannerError(error.message ?? "Could not sign in.");
+      return;
+    }
+
+    if (signIn.status === "complete") {
+      await finishAndRedirect();
+      return;
+    }
+
+    // User has MFA enrolled — pick the strongest available factor.
+    if (signIn.status === "needs_second_factor") {
+      const factors = signIn.supportedSecondFactors ?? [];
+      const hasTotp = factors.some((f) => f.strategy === "totp");
+      const hasPhone = factors.some((f) => f.strategy === "phone_code");
+      const hasBackup = factors.some((f) => f.strategy === "backup_code");
+
+      setCanUseBackupCode(hasBackup);
+
+      if (hasTotp) {
+        setStrategy("totp");
+      } else if (hasPhone) {
+        setStrategy("phone_code");
+        await signIn.mfa.sendPhoneCode();
+      } else if (hasBackup) {
+        setStrategy("backup_code");
+      } else {
+        setBannerError("No supported second factor is available on this account.");
         return;
       }
-      if (result.status === "needs_second_factor") {
-        setPhase("second_factor");
+      setPhase("verify");
+      setCode("");
+      return;
+    }
+
+    // Client Trust: new device challenge for an account without enrolled MFA.
+    // Clerk falls back to an emailed one-time code.
+    if (signIn.status === "needs_client_trust") {
+      const emailFactor = (signIn.supportedSecondFactors ?? []).find(
+        (f) => f.strategy === "email_code",
+      );
+      if (emailFactor) {
+        setStrategy("email_code");
+        setCanUseBackupCode(false);
+        await signIn.mfa.sendEmailCode();
+        setPhase("verify");
         setCode("");
         return;
       }
-      setError(`Unexpected sign-in state: ${result.status ?? "unknown"}.`);
-    } catch (err: unknown) {
-      setError(extractClerkError(err));
-    } finally {
-      setSubmitting(false);
+      setBannerError("This device needs verification, but no email code is configured.");
+      return;
     }
+
+    if (signIn.status === "needs_new_password") {
+      setBannerError("Your password must be reset before signing in. Use ‘Forgot password’.");
+      return;
+    }
+
+    setBannerError(`Sign-in not complete: ${signIn.status ?? "unknown"}.`);
   };
 
-  const handleSecondFactor = async (e: FormEvent) => {
+  const handleVerify = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isLoaded || submitting) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      const result = await signIn.attemptSecondFactor({
-        strategy: factor,
-        code,
-      });
-      if (result.status === "complete") {
-        await setActive({ session: result.createdSessionId });
-        router.push("/dashboard");
-        return;
-      }
-      setError("Verification incomplete.");
-    } catch (err: unknown) {
-      setError(extractClerkError(err));
-    } finally {
-      setSubmitting(false);
+    if (submitting) return;
+    setBannerError(null);
+
+    let result: { error: { message?: string } | null };
+    switch (strategy) {
+      case "email_code":
+        result = await signIn.mfa.verifyEmailCode({ code });
+        break;
+      case "phone_code":
+        result = await signIn.mfa.verifyPhoneCode({ code });
+        break;
+      case "totp":
+        result = await signIn.mfa.verifyTOTP({ code });
+        break;
+      case "backup_code":
+        result = await signIn.mfa.verifyBackupCode({ code });
+        break;
     }
+
+    if (result.error) {
+      setBannerError(result.error.message ?? "Invalid code.");
+      return;
+    }
+
+    if (signIn.status === "complete") {
+      await finishAndRedirect();
+      return;
+    }
+    setBannerError("Verification incomplete. Please try again.");
   };
+
+  const handleResend = async () => {
+    if (submitting) return;
+    setBannerError(null);
+    if (strategy === "email_code") await signIn.mfa.sendEmailCode();
+    else if (strategy === "phone_code") await signIn.mfa.sendPhoneCode();
+  };
+
+  const handleSocialError = (msg: string) => setBannerError(msg);
 
   return (
     <div className="min-h-svh flex flex-col">
@@ -93,32 +175,40 @@ export default function SignInPage() {
                 email={email}
                 password={password}
                 showPassword={showPassword}
-                error={error}
+                bannerError={bannerError}
+                fieldErrors={{
+                  identifier: errors.fields.identifier?.message,
+                  password: errors.fields.password?.message,
+                }}
                 submitting={submitting}
                 onEmailChange={setEmail}
                 onPasswordChange={setPassword}
                 onTogglePassword={() => setShowPassword((s) => !s)}
                 onSubmit={handleCredentials}
-                onSocialError={setError}
+                onSocialError={handleSocialError}
               />
             ) : (
-              <SecondFactorStep
-                factor={factor}
+              <VerifyStep
+                strategy={strategy}
+                email={email}
                 code={code}
-                error={error}
+                canUseBackupCode={canUseBackupCode}
+                bannerError={bannerError}
+                fieldError={errors.fields.code?.message}
                 submitting={submitting}
                 onCodeChange={(v) =>
-                  setCode(factor === "totp" ? v.replace(/\D/g, "") : v)
+                  setCode(strategy === "backup_code" ? v : v.replace(/\D/g, ""))
                 }
-                onFactorChange={(f) => {
-                  setFactor(f);
+                onToggleBackup={() => {
+                  setStrategy((s) => (s === "totp" ? "backup_code" : "totp"));
                   setCode("");
-                  setError(null);
+                  setBannerError(null);
                 }}
-                onSubmit={handleSecondFactor}
+                onSubmit={handleVerify}
+                onResend={handleResend}
                 onCancel={() => {
                   setPhase("credentials");
-                  setError(null);
+                  setBannerError(null);
                   setCode("");
                 }}
               />
@@ -134,7 +224,8 @@ function CredentialsStep({
   email,
   password,
   showPassword,
-  error,
+  bannerError,
+  fieldErrors,
   submitting,
   onEmailChange,
   onPasswordChange,
@@ -145,7 +236,8 @@ function CredentialsStep({
   email: string;
   password: string;
   showPassword: boolean;
-  error: string | null;
+  bannerError: string | null;
+  fieldErrors: { identifier?: string; password?: string };
   submitting: boolean;
   onEmailChange: (v: string) => void;
   onPasswordChange: (v: string) => void;
@@ -167,7 +259,7 @@ function CredentialsStep({
       />
 
       <form onSubmit={onSubmit} className="space-y-4">
-        <Field label="Email" id="email">
+        <Field label="Email" id="email" error={fieldErrors.identifier}>
           <input
             id="email"
             type="email"
@@ -178,7 +270,7 @@ function CredentialsStep({
             className={INPUT_CLASS}
           />
         </Field>
-        <Field label="Password" id="password">
+        <Field label="Password" id="password" error={fieldErrors.password}>
           <div className="relative">
             <input
               id="password"
@@ -195,15 +287,11 @@ function CredentialsStep({
               className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-900 transition p-1"
               aria-label={showPassword ? "Hide password" : "Show password"}
             >
-              {showPassword ? (
-                <EyeOff className="size-4" />
-              ) : (
-                <Eye className="size-4" />
-              )}
+              {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </button>
           </div>
         </Field>
-        {error && <ErrorBanner>{error}</ErrorBanner>}
+        {bannerError && <ErrorBanner>{bannerError}</ErrorBanner>}
         <button
           type="submit"
           disabled={submitting || !email || !password}
@@ -233,70 +321,102 @@ function CredentialsStep({
   );
 }
 
-function SecondFactorStep({
-  factor,
+function VerifyStep({
+  strategy,
+  email,
   code,
-  error,
+  canUseBackupCode,
+  bannerError,
+  fieldError,
   submitting,
   onCodeChange,
-  onFactorChange,
+  onToggleBackup,
   onSubmit,
+  onResend,
   onCancel,
 }: {
-  factor: SecondFactor;
+  strategy: VerifyStrategy;
+  email: string;
   code: string;
-  error: string | null;
+  canUseBackupCode: boolean;
+  bannerError: string | null;
+  fieldError?: string;
   submitting: boolean;
   onCodeChange: (v: string) => void;
-  onFactorChange: (f: SecondFactor) => void;
+  onToggleBackup: () => void;
   onSubmit: (e: FormEvent) => void;
+  onResend: () => void;
   onCancel: () => void;
 }) {
-  const isTotp = factor === "totp";
+  const isCodeSent = strategy === "email_code" || strategy === "phone_code";
+  const isBackup = strategy === "backup_code";
+  const isAuthenticatorFlow = strategy === "totp" || strategy === "backup_code";
+
+  const copy = {
+    email_code: {
+      title: "Verify it's you",
+      subtitle: (
+        <>
+          We sent a code to{" "}
+          <span className="text-neutral-900 font-medium">{email}</span>.
+        </>
+      ),
+    },
+    phone_code: {
+      title: "Verify it's you",
+      subtitle: <>We sent a code to your phone.</>,
+    },
+    totp: {
+      title: "Two-factor authentication",
+      subtitle: <>Enter the 6-digit code from your authenticator app.</>,
+    },
+    backup_code: {
+      title: "Two-factor authentication",
+      subtitle: <>Enter one of your saved backup codes.</>,
+    },
+  }[strategy];
+
   return (
     <>
       <div className="mb-6">
         <div className="size-10 rounded-md border border-neutral-200 inline-flex items-center justify-center mb-4">
-          <Shield className="size-5" strokeWidth={2} />
+          {isAuthenticatorFlow ? (
+            <Shield className="size-5" strokeWidth={2} />
+          ) : (
+            <Mail className="size-5" strokeWidth={2} />
+          )}
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Two-factor verification
-        </h1>
-        <p className="mt-1 text-sm text-neutral-600">
-          {isTotp
-            ? "Enter the 6-digit code from your authenticator app."
-            : "Enter one of your one-time backup codes."}
-        </p>
+        <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
+        <p className="mt-1 text-sm text-neutral-600">{copy.subtitle}</p>
       </div>
       <form onSubmit={onSubmit} className="space-y-4">
         <Field
-          label={isTotp ? "Authenticator code" : "Backup code"}
+          label={isBackup ? "Backup code" : "Verification code"}
           id="code"
+          error={fieldError}
         >
           <input
             id="code"
             type="text"
-            inputMode={isTotp ? "numeric" : "text"}
-            pattern={isTotp ? "[0-9]*" : undefined}
+            inputMode={isBackup ? "text" : "numeric"}
+            pattern={isBackup ? undefined : "[0-9]*"}
             autoComplete="one-time-code"
             autoFocus
-            maxLength={isTotp ? 6 : undefined}
+            maxLength={isBackup ? undefined : 6}
             value={code}
             onChange={(e) => onCodeChange(e.target.value)}
-            placeholder={isTotp ? "------" : "xxxx-xxxx"}
+            placeholder={isBackup ? "xxxxxxxx" : "------"}
             className={
-              isTotp
-                ? "w-full rounded-md border border-neutral-200 px-3 py-2.5 text-center text-lg font-mono tracking-[0.4em] text-neutral-900 placeholder:text-neutral-300 focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900 focus:outline-none transition"
-                : INPUT_CLASS
+              isBackup
+                ? INPUT_CLASS
+                : "w-full rounded-md border border-neutral-200 px-3 py-2.5 text-center text-lg font-mono tracking-[0.4em] text-neutral-900 placeholder:text-neutral-300 focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900 focus:outline-none transition"
             }
           />
         </Field>
-        {error && <ErrorBanner>{error}</ErrorBanner>}
+        {bannerError && <ErrorBanner>{bannerError}</ErrorBanner>}
         <button
           type="submit"
-          disabled={
-            submitting || (isTotp ? code.length !== 6 : code.length === 0)
-          }
+          disabled={submitting || (isBackup ? code.length === 0 : code.length !== 6)}
           className={SUBMIT_CLASS}
         >
           {submitting ? (
@@ -317,13 +437,24 @@ function SecondFactorStep({
         >
           Back
         </button>
-        <button
-          type="button"
-          onClick={() => onFactorChange(isTotp ? "backup_code" : "totp")}
-          className="text-neutral-900 font-medium hover:underline underline-offset-4"
-        >
-          {isTotp ? "Use backup code" : "Use authenticator app"}
-        </button>
+        {isCodeSent && (
+          <button
+            type="button"
+            onClick={onResend}
+            className="text-neutral-900 font-medium hover:underline underline-offset-4"
+          >
+            Resend code
+          </button>
+        )}
+        {isAuthenticatorFlow && canUseBackupCode && (
+          <button
+            type="button"
+            onClick={onToggleBackup}
+            className="text-neutral-900 font-medium hover:underline underline-offset-4"
+          >
+            {isBackup ? "Use authenticator app" : "Use a backup code"}
+          </button>
+        )}
       </div>
     </>
   );
@@ -338,10 +469,12 @@ const SUBMIT_CLASS =
 function Field({
   label,
   id,
+  error,
   children,
 }: {
   label: string;
   id: string;
+  error?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -353,6 +486,7 @@ function Field({
         {label}
       </label>
       {children}
+      {error && <p className="mt-1.5 text-xs text-red-600">{error}</p>}
     </div>
   );
 }

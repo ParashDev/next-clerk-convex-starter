@@ -22,9 +22,17 @@ A production-ready Next.js starter with authentication and a real-time database,
 - A `users` table that lazy-creates a Convex row on first authed visit (mirrors Clerk identity)
 - End-to-end types from Convex schema → API → React components
 
-## Quick start
+## Setup
 
-### 1. Clone
+Complete walkthrough — from cloning to a working login. Takes ~10 minutes. No prior Clerk/Convex knowledge needed.
+
+You'll create two free accounts ([Clerk](https://clerk.com) for auth, [Convex](https://convex.dev) for the database) and run two terminals side by side. Everything is free-tier; no credit card.
+
+**Prerequisites:** [Node.js](https://nodejs.org) 20.19+ (or 22.13+) and `git`. Check with `node -v`.
+
+---
+
+### Step 1 — Clone and install
 
 ```bash
 git clone https://github.com/ParashDev/next-clerk-convex-starter my-app
@@ -32,86 +40,145 @@ cd my-app
 npm install
 ```
 
-### 2. Set up Clerk
+**Don't want a `my-app` subfolder?** Clone into the folder you're already in — add a trailing dot:
 
-1. Create a free account at [clerk.com](https://clerk.com).
-2. Create a new application. Pick the sign-in methods you want.
-3. From the [API keys](https://dashboard.clerk.com/last-active?path=api-keys) page, copy your **Publishable Key** (`pk_test_…`) and **Secret Key** (`sk_test_…`).
+```bash
+git clone https://github.com/ParashDev/next-clerk-convex-starter .
+```
 
-### 3. Create the Convex JWT template in Clerk
+---
 
-Convex needs Clerk to issue JWTs in a specific shape. There are two ways to set this up — either works, pick one:
-
-**Option A — One-click integration (easiest):**
-
-In the Clerk dashboard, open the [Convex integration](https://dashboard.clerk.com/apps/setup/convex) and click **Activate**. Clerk auto-creates a JWT template named `convex` with the right claims.
-
-**Option B — Manual JWT template:**
-
-1. Clerk dashboard → **JWT Templates** → **New template**.
-2. Choose the **Convex** preset.
-3. Save it. Clerk names it `convex` automatically — leave that name as-is, our `convex/auth.config.ts` expects `applicationID: "convex"`.
-
-Either way, after this step Clerk shows you an **Issuer URL** like `https://verb-noun-00.clerk.accounts.dev`. **Copy it** — you'll paste it into Convex in step 5.
-
-> Why "convex"? The string in `convex/auth.config.ts` (`applicationID: "convex"`) must match the Clerk JWT template name. If you ever rename the template, update the config too.
-
-### 4. Configure your local env
+### Step 2 — Create your env file
 
 ```bash
 cp .env.local.example .env.local
 ```
 
-Open `.env.local` and paste:
+This creates your local config file. You'll fill it in over the next two steps — Convex first, then Clerk. Leave everything blank for now.
 
-- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (starts with `pk_test_`)
-- `CLERK_SECRET_KEY` (starts with `sk_test_`)
+> `.env.local` is gitignored — never commit it. Note: `CLERK_JWT_ISSUER_DOMAIN` is **not** in this file; it goes on the Convex dashboard (Step 6).
 
-Leave `NEXT_PUBLIC_CONVEX_URL` blank — Convex sets it for you in the next step.
+---
 
-### 5. Set up Convex
+### Step 3 — Create a Convex project (on the web)
 
-In one terminal at the project root:
+1. Go to [convex.dev](https://convex.dev) and create an account.
+2. Click **New project**, give it a name, and pick a region. Create it.
+
+That's the backend + database. Next you connect the CLI to it.
+
+---
+
+### Step 4 — Connect the CLI (terminal 1)
+
+Open a terminal in the project folder and run:
 
 ```bash
 npm run convex          # alias for `npx convex dev`
 ```
 
-This will:
+- **Sign in:** a browser window opens showing a **code**. Check it matches the code printed in your terminal, then confirm in the browser. The CLI logs in as whichever Convex account is active in that browser.
+- **If it asks `local` or `cloud`, choose `cloud`.**
+- It lists your Convex projects — **pick the one you created in Step 3**.
+- It auto-fills `CONVEX_DEPLOYMENT` and `NEXT_PUBLIC_CONVEX_URL` in your `.env.local`, generates the typed API client, and pushes the schema (`users` + `messages` tables).
+- **Keep this terminal open** — it runs continuously and re-syncs on save. (The app's dev server in Step 7 gets its own terminal.)
 
-- Prompt you to log in (GitHub or email).
-- Create a new Convex project.
-- Write `NEXT_PUBLIC_CONVEX_URL` and `CONVEX_DEPLOYMENT` into `.env.local`.
-- Generate `convex/_generated/` (typed API client).
-- Stay running to sync your backend functions on save.
-
-The first sync will fail with a message like:
+It will then **stop with this error and wait** — this is expected, you fix it in Step 6:
 
 ```
 ✖ Environment variable CLERK_JWT_ISSUER_DOMAIN is used in auth config file
   but its value was not set.
-  Go to: https://dashboard.convex.dev/d/<your-deployment>/settings/environment-variables…
 ```
 
-That's expected. Click the link (or open Convex dashboard → your project → Settings → Environment Variables) and add:
+<details>
+<summary><strong>Logged in as the wrong Convex account?</strong></summary>
 
-| Name | Value |
-|---|---|
-| `CLERK_JWT_ISSUER_DOMAIN` | The **Issuer URL** from step 3 (e.g. `https://verb-noun-00.clerk.accounts.dev`, no trailing slash) |
+The browser account is the one the CLI uses. If it's wrong (or you don't see your project), log out and re-run — then confirm in a browser signed into the right account:
 
-> **Important:** `CLERK_JWT_ISSUER_DOMAIN` is a **Convex** environment variable, *not* a Next.js one. It only needs to live on the Convex dashboard — putting it in `.env.local` does nothing. The `.env.local.example` file lists it at the bottom as a reminder.
+```bash
+npx convex logout
+npx convex dev --configure
+```
 
-Save it. The `convex dev` terminal automatically retries and logs `Auth config pushed`.
+`--configure` forces the account + project picker instead of silently reusing the cached one.
+</details>
 
-### 6. Run
+---
 
-In a second terminal:
+### Step 5 — Set up Clerk and paste your keys
+
+Now the auth side. Everything here happens in the [Clerk dashboard](https://dashboard.clerk.com).
+
+1. Sign up at [clerk.com](https://clerk.com) → click **Create application**.
+2. Enable **Email** and **Password** sign-in. (Social logins like Google/GitHub are optional — see [Enabling social login](#enabling-social-login).)
+3. Go to **Configure → API Keys**, and under **Quick Copy** pick the **Next.js** tab.
+4. Copy that snippet and paste it into your `.env.local` — it fills in both keys:
+   ```bash
+   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_xxxxxxxxxxxxx
+   CLERK_SECRET_KEY=sk_test_xxxxxxxxxxxxx
+   ```
+5. Still in Clerk: open **Configure → Sessions → JWT Templates** (or search **JWT Templates**) → **New template** → choose **Convex** from the **Template** dropdown → **Save**. (Every field auto-populates; the template is named `convex`.)
+6. On that template, copy the **Issuer** URL — you paste it in the next step. It looks like:
+   ```
+   https://verb-noun-00.clerk.accounts.dev
+   ```
+
+> Why must the template be named `convex`? Our `convex/auth.config.ts` declares `applicationID: "convex"`, which must match the template name. Rename one → rename both.
+
+---
+
+### Step 6 — Add the Issuer URL to Convex
+
+This clears the error from Step 4 and connects Clerk to Convex.
+
+1. Open [dashboard.convex.dev](https://dashboard.convex.dev) → your project → **Settings → Environment Variables**.
+2. Add a variable:
+
+   | Name | Value |
+   |---|---|
+   | `CLERK_JWT_ISSUER_DOMAIN` | The **Issuer URL** you just copied (e.g. `https://verb-noun-00.clerk.accounts.dev`, no trailing slash) |
+
+3. **Save.** Your `convex dev` terminal (from Step 4) auto-retries within seconds and prints `Convex functions ready!`.
+
+> **This is the #1 thing people miss.** `CLERK_JWT_ISSUER_DOMAIN` lives on the **Convex dashboard**, NOT in `.env.local`. Convex (the backend) uses it to verify Clerk's tokens. Putting it in `.env.local` does nothing.
+
+---
+
+### Step 7 — Run the app (terminal 2)
+
+Open a **second** terminal (leave `convex dev` running in the first):
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), sign up, and you'll land on the dashboard. Type a message — it should appear instantly. Open the page in another tab and watch it sync.
+Open [http://localhost:3000](http://localhost:3000).
+
+---
+
+### Step 8 — Verify it all works
+
+1. Click **Get started** → create an account (email + password). On a Clerk dev instance you can use any email; the verification code is emailed to you (or use Clerk's test address `your_email+clerk_test@example.com` with code `424242`).
+2. You land on `/dashboard`.
+3. Type a message and hit send — it appears instantly.
+4. Open [Convex dashboard](https://dashboard.convex.dev) → your project → **Data**. You should see:
+   - a **`users`** row (auto-created on your first dashboard visit), and
+   - a **`messages`** row (what you just typed).
+
+If you see both, the full chain works: **Clerk auth → JWT → Convex verification → reactive query → live UI.** 🎉
+
+---
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `convex dev` errors about `CLERK_JWT_ISSUER_DOMAIN` | You skipped Step 6. Set it on the Convex dashboard, not `.env.local`. |
+| Signed in, but dashboard data never loads / `isAuthenticated` stays false | Issuer URL mismatch. Re-copy the **Issuer** from Clerk's `convex` JWT template into the Convex env var, then re-run `npx convex dev`. |
+| `convex dev` keeps using the wrong account/project | `npx convex logout` then `npx convex dev --configure`. |
+| `Missing NEXT_PUBLIC_CONVEX_URL` on app start | `convex dev` hasn't run yet (or didn't finish). Run it and let it populate `.env.local`. |
+| OAuth button does nothing / errors | The provider isn't enabled in Clerk. See [Enabling social login](#enabling-social-login). |
+| Changed `.env.local` but nothing updates | Restart `npm run dev` — env vars are read at boot. |
 
 ## Project structure
 
@@ -124,10 +191,9 @@ app/
   clerkLocalization.ts          # Override Clerk's default UI strings
   _components/
     SocialButtons.tsx           # OAuth provider buttons (shared by sign-in & sign-up)
-    clerkErrors.ts              # extractClerkError helper
-  sign-in/page.tsx              # Email + password + 2FA + social (useSignIn hook)
-  sign-up/page.tsx              # Email signup with email-code verify + social (useSignUp hook)
-  sso-callback/page.tsx         # Where OAuth providers redirect back — completes the flow
+  sign-in/page.tsx              # Email + password + Client Trust + 2FA + social (useSignIn)
+  sign-up/page.tsx              # Email signup with email-code verify + social (useSignUp)
+  sso-callback/page.tsx         # Completes the OAuth redirect (handles transfer/edge cases)
   dashboard/
     layout.tsx                  # Nav shell + UserButton + <EnsureUser />
     EnsureUser.tsx              # Lazy-creates the Convex user row on first authed visit
@@ -144,7 +210,7 @@ proxy.ts                        # clerkMiddleware — protects /dashboard
 
 ## Enabling social login
 
-The sign-in and sign-up pages render OAuth buttons **only for providers you've actually enabled in Clerk**. The component reads `clerk.environment.userSettings.authenticatableSocialStrategies` at runtime and filters the `PROVIDERS` array against it — no buttons appear until both ends agree:
+The sign-in and sign-up pages render OAuth buttons **only for providers you've actually enabled in Clerk**. The component reads `clerk.__internal_environment.userSettings.authenticatableSocialStrategies` at runtime and filters the `PROVIDERS` array against it — no buttons appear until both ends agree:
 
 1. **Define the button** in `app/_components/SocialButtons.tsx`:
    ```ts
@@ -159,26 +225,29 @@ The sign-in and sign-up pages render OAuth buttons **only for providers you've a
 
 The button appears the moment Clerk reports the provider as enabled — refresh the page and it's there. If you defined the button but didn't enable it in Clerk, it stays hidden (rather than rendering and erroring on click).
 
-OAuth flow: button click → Clerk redirects to the provider → provider redirects to `/sso-callback` → `<AuthenticateWithRedirectCallback />` finishes the handshake → user lands on `/dashboard`. The callback page is unprotected by middleware (it's not under `/dashboard`).
+OAuth flow: button click → `signIn.sso()` / `signUp.sso()` redirects to the provider → provider redirects back to `/sso-callback` → that page calls `finalize()` and handles account-transfer edge cases → user lands on `/dashboard`. `/sso-callback` is intentionally outside `/dashboard` so middleware doesn't block it.
 
-## Two-factor authentication
+## Authentication flows (the details)
 
-The sign-in form already detects `result.status === "needs_second_factor"` and shows a TOTP code input with a "Use backup code" toggle. You don't have to write anything for it to kick in.
+All auth UI is custom — built on Clerk's hooks (`useSignIn`, `useSignUp`), not Clerk's drop-in `<SignIn />` components. This means full control over styling and behaviour. The flows use Clerk's current API: `signIn.password()`, `signIn.finalize()`, `signIn.mfa.*`, etc.
 
-**How a user enrolls in 2FA:**
+### Two-factor authentication (2FA)
 
-1. Sign in.
-2. Open `<UserButton />` (top-right on the dashboard) → **Manage account** → **Security**.
-3. **Add two-step verification** → choose **Authenticator app** → scan the QR code in their authenticator → save the backup codes.
+When a user has 2FA enrolled, `signIn.password()` returns status `needs_second_factor`. The sign-in form reads `signIn.supportedSecondFactors` and shows the right input automatically:
 
-Next sign-in for that user will prompt for the 2FA code automatically.
+- **`totp`** — 6-digit code from an authenticator app (Google Authenticator, 1Password, Authy). Verified with `signIn.mfa.verifyTOTP()`.
+- **`backup_code`** — a saved one-time code. Verified with `signIn.mfa.verifyBackupCode()`. The form offers a "Use a backup code" toggle when the user has them.
+- **`phone_code`** (SMS) — sent via `signIn.mfa.sendPhoneCode()`, verified with `signIn.mfa.verifyPhoneCode()`.
 
-**Strategies handled in the form:**
+**How a user enrolls in 2FA:** sign in → click the avatar menu (top-right of the dashboard) → **Manage account** → **Security** → **Add two-step verification** → scan the QR with an authenticator app → save the backup codes. Their next sign-in prompts for the code automatically.
 
-- `totp` (default) — 6-digit code from Google Authenticator, 1Password, etc.
-- `backup_code` — single-use codes from enrollment
+### Client Trust (new-device verification)
 
-For SMS 2FA (`phone_code`), you'd need an extra `prepareSecondFactor({ strategy: "phone_code", phoneNumberId })` call before showing the code input. That's roughly 20 extra lines if you need it.
+Clerk's [Client Trust](https://clerk.com/docs/guides/secure/client-trust) feature (on by default) challenges sign-ins from a new device — even for users **without** 2FA — to block credential-stuffing. When it triggers, `signIn.password()` returns status `needs_client_trust`, and Clerk falls back to an emailed one-time code.
+
+The sign-in form handles this automatically: it sends the code with `signIn.mfa.sendEmailCode()` and verifies with `signIn.mfa.verifyEmailCode()`. **No setup needed** — it just works.
+
+To turn Client Trust off (e.g. to simplify dev), go to Clerk dashboard → **Configure** → **Attack protection** (or **Client Trust**) and disable it. With it off, password sign-in is a single step when no 2FA is enrolled.
 
 ## How users get into Convex
 

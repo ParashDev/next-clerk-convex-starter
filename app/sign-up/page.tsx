@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, FormEvent } from "react";
-import { useSignUp } from "@clerk/nextjs/legacy";
+import { useSignUp } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -13,66 +13,81 @@ import {
   Mail,
 } from "lucide-react";
 import { SocialButtons } from "../_components/SocialButtons";
-import { extractClerkError } from "../_components/clerkErrors";
 
 export default function SignUpPage() {
-  const { signUp, isLoaded, setActive } = useSignUp();
+  const { signUp, errors, fetchStatus } = useSignUp();
   const router = useRouter();
 
-  const [phase, setPhase] = useState<"collect" | "verify">("collect");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [code, setCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [code, setCode] = useState("");
+  const [bannerError, setBannerError] = useState<string | null>(null);
+
+  const submitting = fetchStatus === "fetching";
+
+  // Verification phase is derived from Clerk's signUp state — when the only
+  // outstanding requirement is verifying the email address, we're in step 2.
+  const inVerifyPhase =
+    signUp.status === "missing_requirements" &&
+    signUp.unverifiedFields.includes("email_address") &&
+    signUp.missingFields.length === 0;
+
+  const finishAndRedirect = async () => {
+    await signUp.finalize({
+      navigate: ({ session, decorateUrl }) => {
+        if (session?.currentTask) return;
+        const url = decorateUrl("/dashboard");
+        if (url.startsWith("http")) {
+          window.location.href = url;
+        } else {
+          router.push(url);
+        }
+      },
+    });
+  };
 
   const handleStart = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isLoaded || submitting) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      await signUp.create({ emailAddress: email, password });
-      await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
-      setPhase("verify");
-      setCode("");
-    } catch (err: unknown) {
-      setError(extractClerkError(err));
-    } finally {
-      setSubmitting(false);
+    if (submitting) return;
+    setBannerError(null);
+
+    const { error } = await signUp.password({
+      emailAddress: email,
+      password,
+    });
+
+    if (error) {
+      setBannerError(error.message ?? "Could not create account.");
+      return;
     }
+
+    await signUp.verifications.sendEmailCode();
+    setCode("");
   };
 
   const handleVerify = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isLoaded || submitting) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      const result = await signUp.attemptEmailAddressVerification({ code });
-      if (result.status === "complete") {
-        await setActive({ session: result.createdSessionId });
-        router.push("/dashboard");
-        return;
-      }
-      setError("Verification incomplete. Please request a new code.");
-    } catch (err: unknown) {
-      setError(extractClerkError(err));
-    } finally {
-      setSubmitting(false);
+    if (submitting) return;
+    setBannerError(null);
+
+    await signUp.verifications.verifyEmailCode({ code });
+
+    if (signUp.status === "complete") {
+      await finishAndRedirect();
+      return;
     }
+
+    setBannerError("Invalid code or verification incomplete.");
   };
 
   const handleResend = async () => {
-    if (!isLoaded || submitting) return;
-    setError(null);
-    try {
-      await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
-    } catch (err: unknown) {
-      setError(extractClerkError(err));
-    }
+    if (submitting) return;
+    setBannerError(null);
+    await signUp.verifications.sendEmailCode();
   };
+
+  const handleSocialError = (msg: string) => setBannerError(msg);
 
   return (
     <div className="min-h-svh flex flex-col">
@@ -90,33 +105,33 @@ export default function SignUpPage() {
       <main className="flex-1 flex items-center justify-center px-6 py-16 bg-neutral-50/60">
         <div className="w-full max-w-sm">
           <div className="rounded-lg border border-neutral-200 bg-white p-8">
-            {phase === "collect" ? (
+            {!inVerifyPhase ? (
               <CollectStep
                 email={email}
                 password={password}
                 showPassword={showPassword}
-                error={error}
+                bannerError={bannerError}
+                fieldErrors={{
+                  email: errors.fields.emailAddress?.message,
+                  password: errors.fields.password?.message,
+                }}
                 submitting={submitting}
                 onEmailChange={setEmail}
                 onPasswordChange={setPassword}
                 onTogglePassword={() => setShowPassword((s) => !s)}
                 onSubmit={handleStart}
-                onSocialError={setError}
+                onSocialError={handleSocialError}
               />
             ) : (
               <VerifyStep
                 email={email}
                 code={code}
-                error={error}
+                bannerError={bannerError}
+                fieldError={errors.fields.code?.message}
                 submitting={submitting}
                 onCodeChange={(v) => setCode(v.replace(/\D/g, ""))}
                 onSubmit={handleVerify}
                 onResend={handleResend}
-                onChangeEmail={() => {
-                  setPhase("collect");
-                  setError(null);
-                  setCode("");
-                }}
               />
             )}
           </div>
@@ -130,7 +145,8 @@ function CollectStep({
   email,
   password,
   showPassword,
-  error,
+  bannerError,
+  fieldErrors,
   submitting,
   onEmailChange,
   onPasswordChange,
@@ -141,7 +157,8 @@ function CollectStep({
   email: string;
   password: string;
   showPassword: boolean;
-  error: string | null;
+  bannerError: string | null;
+  fieldErrors: { email?: string; password?: string };
   submitting: boolean;
   onEmailChange: (v: string) => void;
   onPasswordChange: (v: string) => void;
@@ -165,7 +182,7 @@ function CollectStep({
       />
 
       <form onSubmit={onSubmit} className="space-y-4">
-        <Field label="Email" id="email">
+        <Field label="Email" id="email" error={fieldErrors.email}>
           <input
             id="email"
             type="email"
@@ -176,7 +193,7 @@ function CollectStep({
             className={INPUT_CLASS}
           />
         </Field>
-        <Field label="Password" id="password">
+        <Field label="Password" id="password" error={fieldErrors.password}>
           <div className="relative">
             <input
               id="password"
@@ -205,9 +222,9 @@ function CollectStep({
             At least 8 characters.
           </p>
         </Field>
-        {/* Required by Clerk — bot-protection challenge mounts here invisibly. */}
+        {/* Required by Clerk's bot-protection — Smart CAPTCHA mounts here. */}
         <div id="clerk-captcha" />
-        {error && <ErrorBanner>{error}</ErrorBanner>}
+        {bannerError && <ErrorBanner>{bannerError}</ErrorBanner>}
         <button
           type="submit"
           disabled={submitting || !email || !password}
@@ -239,21 +256,21 @@ function CollectStep({
 function VerifyStep({
   email,
   code,
-  error,
+  bannerError,
+  fieldError,
   submitting,
   onCodeChange,
   onSubmit,
   onResend,
-  onChangeEmail,
 }: {
   email: string;
   code: string;
-  error: string | null;
+  bannerError: string | null;
+  fieldError?: string;
   submitting: boolean;
   onCodeChange: (v: string) => void;
   onSubmit: (e: FormEvent) => void;
   onResend: () => void;
-  onChangeEmail: () => void;
 }) {
   return (
     <>
@@ -270,7 +287,7 @@ function VerifyStep({
         </p>
       </div>
       <form onSubmit={onSubmit} className="space-y-4">
-        <Field label="Verification code" id="code">
+        <Field label="Verification code" id="code" error={fieldError}>
           <input
             id="code"
             type="text"
@@ -285,7 +302,7 @@ function VerifyStep({
             className="w-full rounded-md border border-neutral-200 px-3 py-2.5 text-center text-lg font-mono tracking-[0.4em] text-neutral-900 placeholder:text-neutral-300 focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900 focus:outline-none transition"
           />
         </Field>
-        {error && <ErrorBanner>{error}</ErrorBanner>}
+        {bannerError && <ErrorBanner>{bannerError}</ErrorBanner>}
         <button
           type="submit"
           disabled={submitting || code.length !== 6}
@@ -301,14 +318,7 @@ function VerifyStep({
           )}
         </button>
       </form>
-      <div className="mt-6 pt-6 border-t border-neutral-200 flex items-center justify-between text-sm">
-        <button
-          type="button"
-          onClick={onChangeEmail}
-          className="text-neutral-600 hover:text-neutral-900 transition"
-        >
-          Use a different email
-        </button>
+      <div className="mt-6 pt-6 border-t border-neutral-200 flex items-center justify-end text-sm">
         <button
           type="button"
           onClick={onResend}
@@ -330,10 +340,12 @@ const SUBMIT_CLASS =
 function Field({
   label,
   id,
+  error,
   children,
 }: {
   label: string;
   id: string;
+  error?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -345,6 +357,7 @@ function Field({
         {label}
       </label>
       {children}
+      {error && <p className="mt-1.5 text-xs text-red-600">{error}</p>}
     </div>
   );
 }
@@ -356,5 +369,3 @@ function ErrorBanner({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-
-
